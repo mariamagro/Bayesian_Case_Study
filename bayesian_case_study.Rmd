@@ -1,0 +1,686 @@
+---
+title: "Bayesian case study"
+author: "María Ángeles Magro Garrote"
+date: "24/4/2024"
+output:
+  pdf_document: default
+  html_document:
+    css: background.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Case study: Predicting Hazardous Near-Earth Objects
+
+Near-Earth Objects (NEOs) present a significant concern to our planet's safety. With the potential to cause catastrophic damage upon impact, accurate prediction and tracking of hazardous NEOs are paramount. This case study focuses on developing predictive models to identify and assess the danger posed by hazardous NEOs, employing both frequentist and Bayesian approaches and comparing them.
+
+<img src="https://storage.googleapis.com/thesylive-article-media/theskylive-near-earth-objects.jpg" alt="Alt Text" width="300" height="200">
+
+```{r, echo=FALSE}
+suppressMessages(suppressWarnings({
+  library(corrplot) # correlation plot
+  library(caret) # training and test set
+  library(R2OpenBUGS) # open bugs bayesian model
+  library(glmnet) # frequentist model
+  library(R2OpenBUGS) # R2OpenBUGS
+  library(MCMCpack) # MCMC
+}))
+```
+
+## 1. Dataset preprocessing
+
+### 1.1. Dataset choice
+
+The dataset used in this study is sourced from an open data collection provided by NASA. It encompasses various variables related to asteroid information, including indicators of whether an asteroid is hazardous or not.
+
+```{r}
+data <- read.csv("nasa.csv")
+
+# summary of the data
+str(data)
+```
+
+
+### 1.2.Feature selection
+
+In order to reduce the variable dimension, we may keep only one distance metric. 
+
+* Est.Dia.in.KM.min.: Minimum estimated diameter of the NEO in kilometers.
+* Est.Dia.in.KM.max.: Maximum estimated diameter of the NEO in kilometers.
+* Est.Dia.in.M.min.: Minimum estimated diameter of the NEO in meters.
+* Est.Dia.in.M.max.: Maximum estimated diameter of the NEO in meters.
+* Est.Dia.in.Miles.min.: Minimum estimated diameter of the NEO in miles.
+* Est.Dia.in.Miles.max.: Maximum estimated diameter of the NEO in miles.
+* Est.Dia.in.Feet.min.: Minimum estimated diameter of the NEO in feet.
+* Est.Dia.in.Feet.max.: Maximum estimated diameter of the NEO in feet.
+
+**Kilometers metric will be keeped, and the average among max and min will be done.** 
+
+```{r}
+# Creation of Est.Dia.in.M.Avg
+data$Est.Dia.in.M.Avg <- (data$Est.Dia.in.M.min. + data$Est.Dia.in.M.max.) / 2
+```
+
+
+* Relative.Velocity.km.per.sec: Relative velocity of the NEO with respect to Earth in kilometers per second.
+* Relative.Velocity.km.per.hr: Relative velocity of the NEO with respect to Earth in kilometers per hour.
+* Miles.per.hour: Relative velocity of the NEO with respect to Earth in miles per hour.
+
+**Relative.Velocity.km.per.hr will be keeped**
+
+* Miss.Dist..Astronomical.: Miss distance of the NEO from Earth in astronomical units.
+* Miss.Dist..lunar.: Miss distance of the NEO from Earth in lunar distances.
+* Miss.Dist..kilometers.: Miss distance of the NEO from Earth in kilometers.
+* Miss.Dist..miles.: Miss distance of the NEO from Earth in miles.
+
+**Miss.Dist..kilometers will be keeped**
+
+Furthermore, the IDs, names and dates variables will be erased because they do not provided any useful information for detecting if the NEO is hazardous.
+
+```{r}
+# Eliminating the other metrics variables and name, IDs, and dates
+data <- subset(data, select = -c(Est.Dia.in.KM.min., Est.Dia.in.KM.max., Est.Dia.in.M.max., Est.Dia.in.M.min., Est.Dia.in.Miles.min., Est.Dia.in.Miles.max., Est.Dia.in.Feet.min., Est.Dia.in.Feet.max., Relative.Velocity.km.per.sec, Miles.per.hour, Miss.Dist..Astronomical., Miss.Dist..lunar.,Miss.Dist..miles., Neo.Reference.ID, Name, Orbit.ID, Close.Approach.Date, Epoch.Date.Close.Approach, Orbit.Determination.Date, Epoch.Osculation ))
+```
+
+The next step in order to achieve a better reduction of the dimensionality of our
+dataset could be checking the correlation among numerical ones.
+
+```{r}
+# Select numerical variables
+numerical_data <- data[, sapply(data, is.numeric)]
+
+# Compute correlation matrix
+correlation_matrix <- cor(numerical_data)
+
+# Create correlation plot
+corrplot(correlation_matrix, method = "circle", type = "upper", tl.cex = 0.7)
+```
+Removing some variables to avoid redundancy and colinearity.
+```{r}
+# absolute magnitude & estimated diameter (redundancy)
+data <- subset(data, select = -c(Est.Dia.in.M.Avg))
+
+# avoiding colinearity
+data <- subset(data, select = -c(Mean.Motion))
+data <- subset(data, select = -c(Orbital.Period))
+data <- subset(data, select = -c(Aphelion.Dist))
+```
+
+There are some variables which only have one level and, therefore, they do not provide any information.
+
+```{r}
+unique(data$Orbiting.Body)
+unique(data$Equinox)
+data <- subset(data, select = -c(Orbiting.Body, Equinox))
+```
+
+Let's review our dataset again after this initial cleaning.
+
+```{r}
+str(data)
+```
+To ascertain the necessity of removing variables, the correlation between each variable and the target will be computed. Only variables demonstrating a discernible correlation will be retained for further analysis.
+
+
+```{r}
+# Convert 'Hazardous' to binary numeric variable
+data$Hazardous <- as.numeric(data$Hazardous == "True")
+
+# Calculate correlation
+correlation <- cor(data[, -c(15)], data$Hazardous)
+
+# Display sorted correlation values
+print(correlation)
+```
+Therefore, the chosen variables for the model construction are: 
+
+* **Absolute Magnitude**: This variable has a negative correlation of approximately -0.33 with the 'Hazardous' classification. Absolute magnitude is a measure of the brightness of an asteroid when viewed from a standard distance and angle. A higher absolute magnitude indicates a dimmer object. The negative correlation suggests that dimmer asteroids are more likely to be hazardous.
+
+* **Relative Velocity (km per hour)**: This variable has a positive correlation of approximately 0.19 with the 'Hazardous' classification. Relative velocity is the speed at which the asteroid is moving relative to the observer (in kilometers per hour). The positive correlation suggests that asteroids with higher relative velocities are more likely to be hazardous.
+
+* **Orbit Uncertainty**: This variable has a negative correlation of approximately -0.33 with the 'Hazardous' classification. Orbit uncertainty measures the uncertainty in determining the orbit of the asteroid. A higher uncertainty indicates a less accurately known orbit. The negative correlation suggests that asteroids with less uncertainty in their orbits are more likely to be hazardous.
+
+* **Minimum Orbit Intersection**: This variable has a negative correlation of approximately -0.29 with the 'Hazardous' classification. Minimum orbit intersection is a measure of how close the asteroid's orbit comes to intersecting with Earth's orbit. A smaller value indicates a closer approach. The negative correlation suggests that asteroids with closer minimum orbit intersections are more likely to be hazardous.
+
+* **Perihelion Distance**: This variable has a negative correlation of approximately -0.21 with the 'Hazardous' classification. Perihelion distance is the closest distance between the asteroid and the Sun during its orbit. The negative correlation suggests that asteroids with smaller perihelion distances are more likely to be hazardous.
+
+* **Eccentricity**: This variable has a positive correlation of approximately 0.18 with the 'Hazardous' classification. Eccentricity describes the shape of the asteroid's orbit, with values closer to 1 indicating a more elongated orbit and values closer to 0 indicating a more circular orbit. The positive correlation suggests that asteroids with more eccentric orbits (i.e., more elongated orbits) are more likely to be hazardous.
+
+```{r}
+data <- subset(data, select = c(Absolute.Magnitude, Relative.Velocity.km.per.hr, Orbit.Uncertainity, Minimum.Orbit.Intersection, Perihelion.Distance, Eccentricity, Hazardous))
+```
+
+### 1.3. Data cleaning and transformation
+
+First, missing values must be checked out.
+
+```{r}
+missing_values <- sum(is.na(data))
+missing_values
+```
+Next, an assessment will be conducted to identify any imbalances within our predicted variable, "Hazardous."
+
+```{r}
+class_distribution <- table(data$Hazardous)
+
+barplot(class_distribution, main = "Class Distribution of Hazardous Variable", 
+        xlab = "Class", ylab = "Frequency", col = c("skyblue", "salmon"))
+```
+
+In order to address the imbalance, the minority class is oversampled by randomly selecting instances from it to match the count of the majority class. This oversampled subset of data is then combined with the original dataset to create a balanced dataset where both classes are equally represented. This ensures that any model is not biased towards the majority class, thereby enhancing its performance in handling imbalanced data.
+
+```{r}
+# Check current class distribution
+class_distribution <- table(data$Hazardous)
+print(class_distribution)
+
+# Calculate the maximum count among classes
+max_count <- max(class_distribution)
+
+# Identify minority and majority classes
+minority_class <- names(class_distribution)[which.min(class_distribution)]
+majority_class <- names(class_distribution)[which.max(class_distribution)]
+
+# Oversample the minority class
+minority_indices <- which(data$Hazardous == minority_class)
+oversampled_indices <- sample(minority_indices, max_count - class_distribution[minority_class], replace = TRUE)
+oversampled_data <- data[oversampled_indices, ]
+
+# Combine oversampled data with original data
+balanced_data <- rbind(data, oversampled_data)
+
+# Check the new class distribution
+balanced_class_distribution <- table(balanced_data$Hazardous)
+print(balanced_class_distribution)
+```
+
+```{r}
+# the new data will be the balanced data
+data <- balanced_data
+```
+
+### 1.4. Variable exploration & visualization
+
+First, it can be a good idea to plot the density of our numerical variables. 
+
+```{r}
+# Set the layout to arrange plots in a grid
+par(mfrow = c(3, 2))  # 3 rows, 2 columns
+
+# Create density plots for each variable
+plot(density(data$Absolute.Magnitude), main = "Density Plot of Absolute Magnitude")
+plot(density(data$Relative.Velocity.km.per.hr), main = "Density Plot of Relative Velocity (km per hr)")
+plot(density(data$Orbit.Uncertainity), main = "Density Plot of Orbit Uncertainty")
+plot(density(data$Minimum.Orbit.Intersection), main = "Density Plot of Minimum Orbit Intersection")
+plot(density(data$Perihelion.Distance), main = "Density Plot of Perihelion Distance")
+plot(density(data$Eccentricity), main = "Density Plot of Eccentricity")
+
+```
+
+* **Absolute Magnitude:** The distribution is slightly skewed to the right, meaning there are more objects with fainter absolute magnitudes than brighter absolute magnitudes.
+
+* **Relative Velocity:** The distribution is skewed to the right, meaning there are more objects with slower relative velocities than faster relative velocities.
+
+* **Orbit Uncertainty:** The distribution appears to be strongly right-skewed, meaning most objects have a low orbit uncertainty. This might suggest the observations for these objects are quite precise, or there could be a systematic bias towards higher confidence in the measurements.
+
+* **Minimum Orbit Intersection:** The plot is strongly skewed to the left. This implies that the minimum orbit intersection values in the dataset tend to be lower than the average value.
+
+* **Perihelion Distance:** The distribution appears to be bimodal, with one peak around 0.4 and another peak around 1.0. This could indicate that there are two populations of objects with different closest approaches to the central body.
+
+* **Eccentricity:** The distribution of eccentricities across all objects may be close to a normal distribution centered around 0.4. This suggests most objects have eccentricities near 0.4, with some spread on either side towards 0 (perfect circle) and 1 (highly elongated ellipse). In other words, the individual eccentricity of an object describes its "stretchedness," but when looking at many eccentricities together, they might follow a bell-shaped curve.
+
+Now, it could provide us useful insights dividing this densities by Hazardous.
+
+```{r}
+# Get the column names excluding 'Hazardous'
+plot_vars <- setdiff(names(data), "Hazardous")
+
+# Create density plots for each variable in plot_vars
+density_plots <- lapply(plot_vars, function(var) {
+  ggplot(data, aes(x = !!as.name(var), fill = as.factor(Hazardous))) +
+    geom_density(alpha = 0.5) +
+    labs(title = paste("Density Plot of", var, "by Hazardous"), x = var, fill = "Hazardous") +
+    theme_minimal()
+})
+
+# Print the plots
+print(density_plots)
+```
+
+Also some interesting views can be extracted from plotting the boxplots of the numerical variables divided by Hazardous.
+
+```{r}
+# Get the column names excluding 'Hazardous'
+plot_vars <- setdiff(names(data), "Hazardous")
+
+# Create box plots for each variable in plot_vars
+box_plots <- lapply(plot_vars, function(var) {
+  ggplot(data, aes(x = as.factor(Hazardous), y = !!as.name(var), fill = as.factor(Hazardous))) +
+    geom_boxplot(alpha = 0.7) +
+    labs(title = paste("Box Plot of", var, "by Hazardous"), x = "Hazardous", y = var, fill = "Hazardous") +
+    theme_minimal()
+})
+
+# Print the plots
+print(box_plots)
+```
+
+### 1.5. Creation of a training and test set
+
+To evaluate the accuracy of the models, a subset will be created for training purposes, and another for testing. 
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Split the dataset into 80% training and 20% testing
+train_index <- createDataPartition(data$Hazardous, p = 0.8, list = FALSE)
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+```
+
+## 2. Frequentist model
+
+In frequentist statistics, probabilities represent long-run frequencies or limits of certain events occurring, based on repeated sampling. It treats parameters as fixed but unknown values, estimating them through methods like maximum likelihood estimation. 
+
+### 2.1. Frequentist model creation
+
+The following code fits a logistic regression model with regularization using the glmnet package, where predictors are provided as a matrix and the target variable is specified as binary.
+
+```{r}
+# Fit logistic regression model with regularization
+model <- glmnet(as.matrix(train_data[, -7]), train_data$Hazardous, family = "binomial")
+```
+
+### 2.2. Frequentist output
+
+```{r}
+# Assuming you've extracted the coefficients from your model
+coefficients <- coef(model)
+
+# Convert the coefficients into a matrix
+coefficients_matrix <- as.matrix(coefficients)
+
+# Calculate mean, median, and quantiles for each coefficient
+mean_coefficients <- apply(coefficients_matrix, 1, mean)
+median_coefficients <- apply(coefficients_matrix, 1, median)
+# Calculate 95% confidence interval (2.5th and 97.5th percentiles) for each coefficient
+conf_interval <- apply(coefficients_matrix, 1, quantile, probs = c(0.025, 0.975))
+
+# Combine the results into a data frame
+coefficients_summary <- data.frame(
+  Coefficient = rownames(coefficients_matrix),
+  Mean = mean_coefficients,
+  Median = median_coefficients,
+  Lower_CI = conf_interval[1, ],
+  Upper_CI = conf_interval[2, ]
+)
+
+# Print the summary
+print(coefficients_summary)
+```
+
+The results of the regression analysis reveal insightful relationships between predictor variables and the outcome. 
+
+Notably, the coefficient for "Absolute Magnitude" suggests a negative impact on the outcome, indicating that as the absolute magnitude increases, there's a corresponding decrease in the outcome variable. Similarly, the coefficient for "Orbit Uncertainty" indicates a negative influence, suggesting that higher uncertainty in the orbit is associated with a decrease in the outcome. 
+
+Conversely, variables like "Perihelion Distance" and "Eccentricity" exhibit positive coefficients, suggesting that an increase in these parameters is associated with a higher outcome value. Confidence intervals provide additional context, indicating the range within which the true coefficients are likely to fall. 
+
+These findings offer valuable insights into the factors influencing the outcome variable. 
+
+### 2.3. Frequentist prediction
+
+Using the test data, a new column will be created where the frequentist predictions are stored for further analysis. Also, the accuracy can be obtain with the Hazardous labels.
+
+```{r}
+# Predict using the logistic regression model
+predicted_probs <- predict(model, newx = as.matrix(test_data[, -7]), type = "response")
+
+# Convert predicted probabilities to binary predictions (0 or 1) based on a threshold (e.g., 0.5)
+predicted_class <- ifelse(predicted_probs > 0.5, 1, 0)
+
+# Add the predicted values to the test set
+test_data$Freq_Pred <- predicted_class
+```
+
+```{r}
+# Compute accuracy
+frequentist_accuracy <- mean(test_data$Freq_Pred == test_data$Hazardous)
+print(frequentist_accuracy)
+```
+The same as before can be done with new data by structuring it into a dataset. 
+
+```{r}
+# Create hypothetical data with the correct variables
+hypothetical_data <- data.frame(
+  Absolute.Magnitude = c(20.5, 18.2, 22.0), 
+  Relative.Velocity.km.per.hr = c(15000, 25000, 10000),
+  Orbit.Uncertainity = c(0.1, 0.5, 0.8),
+  Minimum.Orbit.Intersection = c(0.05, 0.1, 0.15),  
+  Perihelion.Distance = c(0.8, 0.9, 1.0),
+  Eccentricity = c(0.2, 0.3, 0.4)
+)
+
+# Convert hypothetical data to matrix format
+hypothetical_data_matrix <- as.matrix(hypothetical_data)
+
+# Predict probabilities of being hazardous without regularization
+predictions_no_regularization <- predict(model, newx = hypothetical_data_matrix, type = "response", s = 0)
+
+# Thresholding the predicted probabilities
+frequentist_predictions <- ifelse(predictions_no_regularization > 0.5, 1, 0)
+
+# Print binary predictions
+print(frequentist_predictions)
+```
+## 3. Bayesian model (R2OpenBUGS)
+
+Bayesian statistics views probabilities as measures of uncertainty or degrees of belief, updating prior beliefs with observed data to obtain posterior distributions. It incorporates prior information about parameters and provides a framework for making probabilistic statements about them, accounting for uncertainty in a more explicit manner.
+
+### 3.1. R2OpenBUGS model creation
+
+R2OpenBUGS serves as a bridge between the statistical computing environment in R and OpenBUGS, facilitating the creation, manipulation, and analysis of Bayesian models. This interface allows R users to harness the powerful Bayesian modeling capabilities of OpenBUGS while leveraging the extensive data manipulation and visualization tools available in R.
+
+```{r}
+# Number of observations
+n <- nrow(train_data)  
+
+# Bayesian logistic model for classification
+model <- function(){
+  for( i in 1:n){ 
+    # Logistic!
+    y[i] ~ dbern(p[i])
+    logit(p[i]) <- beta0 + beta1 * x1[i] + beta2 * x2[i] + beta3 * x3[i] + beta4 * x4[i] + beta5 * x5[i] + beta6 * x6[i]
+  }
+  
+  beta0 ~ dnorm(0.0, 1.0E-6)
+  beta1 ~ dnorm(0.0, 1.0E-6)
+  beta2 ~ dnorm(0.0, 1.0E-6)
+  beta3 ~ dnorm(0.0, 1.0E-6)
+  beta4 ~ dnorm(0.0, 1.0E-6)
+  beta5 ~ dnorm(0.0, 1.0E-6)
+  beta6 ~ dnorm(0.0, 1.0E-6)
+}
+
+# Data list
+data_list <- list(
+  n = n,
+  y = train_data$Hazardous,
+  x1 = train_data$Absolute.Magnitude,
+  x2 = train_data$Relative.Velocity.km.per.hr,
+  x3 = train_data$Orbit.Uncertainity,
+  x4 = train_data$Minimum.Orbit.Intersection,
+  x5 = train_data$Perihelion.Distance,
+  x6 = train_data$Eccentricity
+)
+
+# Initial values for parameters
+inits <- function(){
+  list(beta0 = 0, beta1 = 0, beta2 = 0, beta3 = 0, beta4 = 0, beta5 = 0, beta6 = 0)
+}
+
+# Perform Bayesian inference using OpenBUGS
+output <- bugs(data = data_list,
+               inits = inits,
+               parameters.to.save = c("beta0", "beta1", "beta2", "beta3", "beta4", "beta5", "beta6"),
+               model.file = model,
+               n.chains = 1,
+               n.burnin = 500,
+               n.iter = 5000
+)
+
+```
+
+### 3.2. R2OpenBUGS convergence
+
+```{r}
+# Iterate over each beta variable from beta1 to beta5
+for (i in 1:5) {
+  beta_name <- paste0("beta", i)
+  
+  # Time series plot for the current beta variable
+  ts.plot(output$sims.list[[beta_name]], main = paste("Time Series Plot of", beta_name))
+  
+  # Autocorrelation plot for the current beta variable
+  acf(output$sims.list[[beta_name]], main = paste("Autocorrelation Plot of", beta_name))
+}
+```
+
+### 3.3 R2OpenBUGS output
+
+Mean, median and quantiles
+
+```{r}
+# Extract posterior samples
+posterior_samples <- output$sims.matrix
+
+# Calculate mean for each parameter
+means <- colMeans(posterior_samples)
+
+# Calculate median for each parameter
+medians <- apply(posterior_samples, 2, median)
+
+print(means)
+print(medians)
+```
+
+```{r}
+print("Quantiles: ")
+output$summary[, c("2.5%", "97.5%")]
+```
+In the context of our Bayesian logistic regression analysis, the presented quantiles offer valuable insights into the estimated coefficients and model fit.
+
+* Notably, 'beta0' represents the intercept term, indicating the baseline probability of class 1 when all predictor variables are zero. The quantiles range from approximately 6.44 to 39.05, suggesting considerable uncertainty regarding this baseline probability.
+
+* 'beta1' through 'beta6' denote the coefficients for the predictor variables. Among these, 'beta1' appears to be relatively important, with quantiles ranging from approximately -1.67 to -0.45. This indicates that 'x1' (Absolute Magnitude) likely plays a significant role in influencing the log odds of the outcome.
+Conversely, 'beta2' has quantiles very close to zero, suggesting minimal impact of 'x2' (Relative Velocity) on the outcome.
+
+* 'beta3' and 'beta4' also exhibit substantial variability in their quantiles, indicating uncertainty in the effects of 'x3' (Orbit Uncertainty) and 'x4' (Minimum Orbit Intersection) on the outcome.
+
+* 'beta5' and 'beta6' present wider ranges in their quantiles, suggesting notable uncertainty in the effects of 'x5' (Perihelion Distance) and 'x6' (Eccentricity) on the outcome.
+
+Furthermore, the quantiles for 'deviance' reveal variability in model fit, with lower values indicating better fit. In this instance, the deviance ranges from approximately 2127 to 2920, suggesting some variability in the model's fit across posterior samples.
+
+These insights aid in understanding the relative importance of predictor variables in influencing the outcome and highlight the uncertainty inherent in the model's estimation process.
+
+### 2.4. R2OpenBUGS prediction
+
+Again, the test set is predicted with our actual model and a new column is created with these predictions.
+
+```{r}
+# Extract posterior samples
+posterior_samples <- as.matrix(output$sims.matrix)
+
+# Define a function to compute predicted probabilities
+compute_probs <- function(posterior_samples, x_data) {
+  n_samples <- nrow(posterior_samples)
+  n_data <- nrow(x_data)
+  probs <- matrix(NA, nrow = n_data, ncol = n_samples)
+  for (i in 1:n_samples) {
+    beta <- posterior_samples[i, ]
+    probs[, i] <- plogis(beta[1] + 
+                         beta[2] * x_data$Absolute.Magnitude + 
+                         beta[3] * x_data$Relative.Velocity.km.per.hr +
+                         beta[4] * x_data$Orbit.Uncertainity +
+                         beta[5] * x_data$Minimum.Orbit.Intersection +
+                         beta[6] * x_data$Perihelion.Distance +
+                         beta[7] * x_data$Eccentricity)
+  }
+  return(probs)
+}
+
+# Compute predicted probabilities for the test set
+test_probs <- compute_probs(posterior_samples, test_data)
+
+# Take the mean of the predicted probabilities as the predicted probability
+test_predicted_prob <- rowMeans(test_probs)
+
+# Convert probabilities to binary predictions (0 or 1) based on a threshold (0.5)
+test_predicted <- ifelse(test_predicted_prob > 0.5, 1, 0)
+
+test_data$R2OpnBugs_Pred <- test_predicted
+```
+
+```{r}
+# Compute accuracy over the test set
+accuracy_r2openbugs <- mean(test_predicted == test_data$Hazardous)
+print(paste("Accuracy:", accuracy_r2openbugs))
+```
+Also, using the hypothetical data created before, the prediction is made.
+
+```{r}
+
+# Compute predicted probabilities for the hypothetical data
+hypothetical_probs <- compute_probs(posterior_samples, hypothetical_data)
+
+# Take the mean of the predicted probabilities as the predicted probability
+hypothetical_predicted_prob <- rowMeans(hypothetical_probs)
+
+# Convert probabilities to binary predictions (0 or 1) based on a threshold (0.5)
+hypothetical_predicted <- ifelse(hypothetical_predicted_prob > 0.5, 1, 0)
+
+# Compute confidence and predictive intervals
+confidence_interval <- apply(hypothetical_probs, 1, function(x) quantile(x, c(0.025, 0.975)))
+predictive_interval <- apply(hypothetical_probs, 1, function(x) quantile(x, c(0.025, 0.975)))
+
+print("Predicted Probabilities:")
+print(hypothetical_predicted_prob)
+
+print("Binary Predictions:")
+print(hypothetical_predicted)
+
+print("Confidence Interval (95%):")
+print(confidence_interval)
+
+print("Predictive Interval (95%):")
+print(predictive_interval)
+```
+## 4. MCMC
+
+Markov Chain Monte Carlo (MCMC) methods play a pivotal role in Bayesian model creation by enabling the estimation of posterior distributions for model parameters. Unlike classical methods that provide point estimates, Bayesian approaches provide probability distributions over parameters, accommodating uncertainty and enabling richer inference. 
+### 4.1. MCMC model creation
+
+```{r}
+# Define the logistic regression model
+bayes_model <- MCMClogit(Hazardous ~ Absolute.Magnitude + 
+                          Relative.Velocity.km.per.hr + 
+                          Orbit.Uncertainity + 
+                          Minimum.Orbit.Intersection + 
+                          Perihelion.Distance + 
+                          Eccentricity, 
+                          data = train_data, thin = 10, burnin = 1000, mcmc = 50000)
+
+# Summary of the MCMC output
+summary(bayes_model)
+```
+
+### 4.2. MCMC convergence
+
+```{r, fig.width=8, fig.height=10}
+# Plot diagnostics
+plot(bayes_model) 
+```
+
+### 4.3. MCMC output 
+
+```{r}
+# Extract coefficients and sigma2
+beta <- bayes_model[, 1:6]
+sigma2 <- bayes_model[, 7]
+
+# Mean and median of coefficients
+apply(beta, 2, mean)
+apply(beta, 2, median)
+
+# Mean and median of sigma2
+mean(sigma2)
+median(sigma2)
+
+# 95% credible intervals
+apply(bayes_model, 2, quantile, probs = c(0.025, 0.975))
+
+```
+This model identified several key predictors. 
+
+Among these, the intercept term (beta0) had a mean value of approximately 36.75, representing the baseline hazard probability when all other predictors are zero.
+
+The absolute magnitude (beta1) exhibited a negative association with hazardousness, with a mean coefficient around -1.55, indicating that larger absolute magnitudes are associated with lower probabilities of an asteroid being hazardous. Conversely, the perihelion distance (beta5) and eccentricity (beta6) showed positive associations, with mean coefficients of approximately 1.07 each, implying that asteroids with closer perihelion distances and higher eccentricities are more likely to be hazardous. The relative velocity (beta2), orbit uncertainty (beta3), and minimum orbit intersection (beta4) displayed relatively smaller coefficients, suggesting less pronounced effects on hazardousness compared to other predictors. 
+
+### 4.4. Data prediction
+
+Again, the predictions can be done to the test set and the accuracy can be obtained.
+
+```{r}
+# Convert bayes_model object to matrix
+posterior_samples <- as.matrix(bayes_model)
+
+# Extract the predictor variables from test_data
+x_new <- model.matrix(~ Absolute.Magnitude + Relative.Velocity.km.per.hr + 
+                       Orbit.Uncertainity + Minimum.Orbit.Intersection + 
+                       Perihelion.Distance + Eccentricity, data = test_data)
+
+# Perform matrix multiplication
+predictions <- x_new %*% t(posterior_samples)
+
+# Take the mean of the predictions across all posterior samples
+predicted_hazardous <- rowMeans(predictions)
+
+# Classify predictions based on threshold (0.5)
+test_data$MCMC_Pred <- ifelse(predicted_hazardous > 0.5, 1, 0)
+
+# Calculate accuracy
+mcmc_accuracy <- mean(test_data$MCMC_Pred == as.numeric(test_data$Hazardous))
+
+# Print the accuracy
+print(paste("Accuracy:", mcmc_accuracy))
+```
+Finally, let's predict hypotethetical data again with this model.
+
+```{r}
+# Convert bayes_model object to matrix
+posterior_samples <- as.matrix(bayes_model)
+
+# Extract the predictor variables from hypothetical_data
+x_new <- model.matrix(~ Absolute.Magnitude + Relative.Velocity.km.per.hr + 
+                       Orbit.Uncertainity + Minimum.Orbit.Intersection + 
+                       Perihelion.Distance + Eccentricity, data = hypothetical_data)
+
+# Perform matrix multiplication
+predictions <- x_new %*% t(posterior_samples)
+
+# Take the mean of the predictions across all posterior samples
+predicted_probabilities <- rowMeans(predictions)
+
+# Convert probabilities to binary outcomes (0 or 1) based on threshold (0.5)
+predicted_hazardous <- ifelse(predicted_probabilities > 0.5, 1, 0)
+
+# Print the predicted Hazardous output
+print(predicted_hazardous)
+```
+
+
+## Conclusions
+In this project, we developed and compared three different approaches for predicting asteroid hazardousness: frequentist logistic regression, Bayesian logistic regression using R2OpenBUGS, and Bayesian logistic regression using MCMC methods.
+
+```{r}
+print(frequentist_accuracy)
+print(accuracy_r2openbugs)
+print(mcmc_accuracy)
+```
+
+Starting with frequentist logistic regression, we obtained a lower accuracy than the rest. This method provides point estimates for coefficients and does not explicitly account for uncertainty.
+
+Moving on to Bayesian logistic regression with R2OpenBUGS, we leveraged the power of Bayesian statistics to model uncertainty explicitly. This approach yielded an accuracy similar to MCMC. By sampling from the posterior distribution of parameters, we gained insights into parameter uncertainty and model fit, allowing us to make probabilistic statements about the coefficients.
+
+Finally, we employed MCMC methods for Bayesian logistic regression, which also provided estimates of parameter uncertainty. By summarizing the posterior distributions of coefficients and examining their credible intervals, we gained valuable insights into the relative importance of predictor variables and their associations with asteroid hazardousness.
+
+Comparing the three methods, we found that Bayesian approaches, both with R2OpenBUGS and MCMC, generally outperformed frequentist logistic regression. Additionally, Bayesian methods provided richer insights into parameter uncertainty and model fit, enabling more informed decision-making.
+
+In scrutinizing the model outputs from both R2OpenBUGS and MCMC analyses, it becomes apparent that certain predictor variables exert varying degrees of influence on predicting hazardous space events. Notably, Absolute Magnitude (beta1), Orbit Uncertainty (beta3), Minimum Orbit Intersection (beta4), Perihelion Distance (beta5), and Eccentricity (beta6) consistently emerge as pivotal factors, exhibiting significance as their confidence intervals exclude zero in both analyses. These variables are deemed more critical in forecasting hazardous occurrences in space. Conversely, Relative Velocity (beta2) demonstrates less consistent importance, with its confidence interval encompassing zero, indicating potentially lower relevance in determining the likelihood of hazardous events compared to the others. 
+
+This understanding of variable importance underscores the imperative of prioritizing variables with robust and consistent effects for accurate risk assessment and the formulation of effective mitigation strategies in space endeavors.
+
+In conclusion, Bayesian logistic regression, whether implemented through R2OpenBUGS or MCMC methods, offers a powerful framework for modeling uncertainty and making probabilistic predictions about asteroid hazardousness. These approaches can be valuable tools for decision-making in asteroid risk assessment and mitigation efforts.
+
