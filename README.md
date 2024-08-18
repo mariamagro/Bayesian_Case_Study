@@ -3,7 +3,7 @@
 ## Overview
 This project focuses on predicting hazardous Near-Earth Objects (NEOs) using both Bayesian and frequentist statistical methods. The objective is to develop predictive models that identify potentially dangerous NEOs based on various orbital and physical characteristics. The analysis employs a dataset provided by NASA and involves a comprehensive data preprocessing, feature selection, and model evaluation comparing both a frequentist and a bayesian approach.
 
-![Introduction to NEOs](photos/introduccion_NEOS.jpg)
+![Introduction to NEOs](photos/introduccion_NEOS.png)
 
 ## Project Structure
 
