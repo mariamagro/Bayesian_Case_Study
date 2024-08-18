@@ -35,4 +35,4 @@ This project focuses on predicting hazardous Near-Earth Objects (NEOs) using bot
 
 ## Results
 
-The insights are avaiable at the end of the notebook uploaded.
+The insights are available at the end of the notebook uploaded.
