@@ -9,7 +9,7 @@ This project focuses on predicting hazardous Near-Earth Objects (NEOs) using bot
 
 ### 1. Dataset Preprocessing
 
-1.1. Dataset Choice: NASA's dataset containing various NEO attributes (https://www.kaggle.com/datasets/shrutimehta/nasa-asteroids-classification).  
+1.1. Dataset Choice: [NASA's dataset containing various NEO attributes](https://www.kaggle.com/datasets/shrutimehta/nasa-asteroids-classification).  
 1.2. Feature Selection: Dimensionality reduction by selecting key variables influencing NEO hazard classification.  
 1.3. Data Cleaning and Transformation: Addressing missing values and class imbalance using oversampling techniques.  
 1.4. Variable Exploration & Visualization: Visualizing the distribution and relationship of variables.  
